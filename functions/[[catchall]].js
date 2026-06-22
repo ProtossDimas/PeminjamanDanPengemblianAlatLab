@@ -9,16 +9,33 @@
 //   GOOGLE_PRIVATE_KEY      → private key PEM dari JSON key service account
 //                             (boleh disalin apa adanya, termasuk \n di dalamnya)
 //   GOOGLE_SHEET_ID          → ID spreadsheet (sama seperti GOOGLE_SHEET_ID lama)
-//   GOOGLE_DRIVE_FOLDER_ID    → ID folder Drive untuk attachment pengembalian
 //   SUPER_ADMIN_USERNAME    → username super-admin
 //   SUPER_ADMIN_PASSWORD    → password super-admin
 //
+//   --- Khusus upload Drive (akun Gmail pribadi, BUKAN service account) ---
+//   GOOGLE_DRIVE_FOLDER_ID       → ID folder Drive (milik akun Gmail pribadi) untuk attachment
+//   GOOGLE_OAUTH_CLIENT_ID       → OAuth Client ID dari Google Cloud Console
+//   GOOGLE_OAUTH_CLIENT_SECRET   → OAuth Client Secret
+//   GOOGLE_OAUTH_REFRESH_TOKEN   → refresh token hasil consent akun Gmail pribadi (sekali saja)
+//
 // SETUP GOOGLE (sekali saja):
-//   1. Buat Service Account di Google Cloud Console (Project apa saja).
-//   2. Buat & download JSON key-nya.
-//   3. Share Spreadsheet & Folder Drive attachment ke email service account
-//      tersebut dengan akses "Editor".
-//   4. Salin client_email & private_key dari JSON ke environment variable di atas.
+//   1. Buat Service Account di Google Cloud Console (Project apa saja) — untuk Sheets.
+//   2. Buat & download JSON key-nya. Share Spreadsheet ke email service account, akses "Editor".
+//   3. Salin client_email & private_key dari JSON ke environment variable di atas.
+//
+//   4. Untuk Drive: Service Account TIDAK punya kuota storage (akun Gmail biasa tidak
+//      mendukung Shared Drive), jadi upload file harus pakai OAuth atas nama akun Gmail asli:
+//      a. Google Cloud Console → APIs & Services → Credentials → Create Credentials
+//         → OAuth client ID → Application type: Web application
+//         → Authorized redirect URI: https://developers.google.com/oauthplayground
+//      b. Buka https://developers.google.com/oauthplayground → klik ikon gear (kanan atas)
+//         → centang "Use your own OAuth credentials" → isi Client ID & Client Secret dari (a)
+//      c. Di kiri, pilih/isi scope: https://www.googleapis.com/auth/drive.file
+//         → Authorize APIs → login & izinkan dengan akun Gmail pribadi pemilik folder
+//      d. Klik "Exchange authorization code for tokens" → copy "Refresh token"
+//      e. Simpan Client ID, Client Secret, Refresh token ke 3 env var GOOGLE_OAUTH_* di atas
+//      f. GOOGLE_DRIVE_FOLDER_ID = ID folder di My Drive akun Gmail itu (folder TIDAK perlu
+//         di-share ke service account lagi, karena yang upload sekarang akun Gmail itu sendiri)
 
 const HEADER_ROW = 3;
 const DATA_ROW   = 5;
@@ -122,6 +139,44 @@ async function getAccessToken(env) {
   _cachedToken = data.access_token;
   _cachedTokenExp = now + (data.expires_in || 3600);
   return _cachedToken;
+}
+
+// ══════════════════════════════════════════════════════════════
+// GOOGLE DRIVE AUTH — OAuth refresh token (akun Gmail pribadi)
+// Dipisah dari getAccessToken() karena Service Account tidak punya
+// kuota storage di Drive biasa (bukan Shared Drive).
+// ══════════════════════════════════════════════════════════════
+let _cachedDriveToken = null;
+let _cachedDriveTokenExp = 0;
+
+async function getDriveAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (_cachedDriveToken && _cachedDriveTokenExp > now + 30) return _cachedDriveToken;
+
+  if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET || !env.GOOGLE_OAUTH_REFRESH_TOKEN) {
+    throw new Error(
+      'OAuth Drive belum dikonfigurasi. Set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, ' +
+      'dan GOOGLE_OAUTH_REFRESH_TOKEN di environment variable (lihat komentar setup di atas file ini).'
+    );
+  }
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:
+      'client_id=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_ID) +
+      '&client_secret=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_SECRET) +
+      '&refresh_token=' + encodeURIComponent(env.GOOGLE_OAUTH_REFRESH_TOKEN) +
+      '&grant_type=refresh_token',
+  });
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error('Gagal refresh OAuth token Drive: ' + JSON.stringify(data));
+  }
+
+  _cachedDriveToken = data.access_token;
+  _cachedDriveTokenExp = now + (data.expires_in || 3600);
+  return _cachedDriveToken;
 }
 
 function base64url(input) {
@@ -584,7 +639,7 @@ async function uploadAttachment(env, base64, fileName, mimeType, idTrans) {
       return { success: false, message: 'GOOGLE_DRIVE_FOLDER_ID belum dikonfigurasi.' };
     }
 
-    const token = await getAccessToken(env);
+    const token = await getDriveAccessToken(env);
     const safeName = (idTrans + '_' + fileName).replace(/[^a-zA-Z0-9_.\-]/g, '_');
 
     const metadata = { name: safeName, parents: [env.GOOGLE_DRIVE_FOLDER_ID] };
@@ -614,7 +669,7 @@ async function uploadAttachment(env, base64, fileName, mimeType, idTrans) {
     if (!uploadRes.ok) {
       return {
         success: false,
-        message: 'Gagal membuat file di Drive. Pastikan folder sudah di-share ke service account dengan akses Editor. Detail: ' +
+        message: 'Gagal membuat file di Drive. Pastikan GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN sudah benar dan folder GOOGLE_DRIVE_FOLDER_ID milik akun Gmail yang sama dengan refresh token. Detail: ' +
           (uploadData.error?.message || JSON.stringify(uploadData)),
       };
     }
