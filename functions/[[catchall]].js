@@ -1,1 +1,646 @@
+// ╔══════════════════════════════════════════════════════════════╗
+// ║  LABORATORIUM POLBAN — Cloudflare Pages Functions Backend     ║
+// ║  Pengganti Google Apps Script. Database TETAP Google Sheets   ║
+// ║  + Google Drive, diakses lewat Service Account (REST API).    ║
+// ╚══════════════════════════════════════════════════════════════╝
+//
+// ENV VARS yang wajib di-set di Cloudflare Pages (Settings → Environment Variables):
+//   GOOGLE_CLIENT_EMAIL     → email service account (xxx@xxx.iam.gserviceaccount.com)
+//   GOOGLE_PRIVATE_KEY      → private key PEM dari JSON key service account
+//                             (boleh disalin apa adanya, termasuk \n di dalamnya)
+//   SPREADSHEET_ID          → ID spreadsheet (sama seperti SPREADSHEET_ID lama)
+//   ATTACHMENT_FOLDER_ID    → ID folder Drive untuk attachment pengembalian
+//   SUPER_ADMIN_USERNAME    → username super-admin
+//   SUPER_ADMIN_PASSWORD    → password super-admin
+//
+// SETUP GOOGLE (sekali saja):
+//   1. Buat Service Account di Google Cloud Console (Project apa saja).
+//   2. Buat & download JSON key-nya.
+//   3. Share Spreadsheet & Folder Drive attachment ke email service account
+//      tersebut dengan akses "Editor".
+//   4. Salin client_email & private_key dari JSON ke environment variable di atas.
 
+const HEADER_ROW = 3;
+const DATA_ROW   = 5;
+const SHEET_INVENTORY = 'Inventory';
+const SHEET_TRANSAKSI = 'Transaksi';
+const SHEET_CONFIG    = 'Config';
+const ADMIN_KEY_PREFIX = 'admin_account:';
+
+// ──────────────────────────────────────────────────────────────
+// ENTRY POINT
+// ──────────────────────────────────────────────────────────────
+export async function onRequest(context) {
+  const { request, env } = context;
+  const url = new URL(request.url);
+
+  if (url.pathname.startsWith('/api/')) {
+    return handleApi(request, env, url.pathname.slice('/api/'.length));
+  }
+
+  // Bukan route API → serahkan ke static asset (index.html, css, js, dll)
+  return context.env.ASSETS.fetch(request);
+}
+
+async function handleApi(request, env, funcName) {
+  if (request.method !== 'POST') {
+    return jsonResponse({ success: false, message: 'Method not allowed' }, 405);
+  }
+
+  let body = {};
+  try { body = await request.json(); } catch (e) { /* body kosong, biarkan {} */ }
+  const args = Array.isArray(body.args) ? body.args : [];
+
+  const handlers = {
+    getInventory,
+    pinjamAlat,
+    kembalikanAlat,
+    getTransaksi,
+    addInventoryItem,
+    verifyAdmin,
+    getAdminAccounts,
+    createAdminAccount,
+    deleteAdminAccount,
+    uploadAttachment,
+  };
+
+  const fn = handlers[funcName];
+  if (!fn) {
+    return jsonResponse({ success: false, message: 'Fungsi tidak dikenal: ' + funcName }, 404);
+  }
+
+  try {
+    const result = await fn(env, ...args);
+    return jsonResponse(result);
+  } catch (e) {
+    return jsonResponse({ success: false, message: 'Error: ' + e.toString() }, 500);
+  }
+}
+
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// GOOGLE AUTH — Service Account JWT (RS256) via Web Crypto
+// ══════════════════════════════════════════════════════════════
+let _cachedToken = null;
+let _cachedTokenExp = 0;
+
+async function getAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000);
+  if (_cachedToken && _cachedTokenExp > now + 30) return _cachedToken;
+
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const claim = {
+    iss: env.GOOGLE_CLIENT_EMAIL,
+    scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive',
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: now + 3600,
+    iat: now,
+  };
+
+  const unsigned = base64url(JSON.stringify(header)) + '.' + base64url(JSON.stringify(claim));
+  const signature = await signRS256(unsigned, env.GOOGLE_PRIVATE_KEY);
+  const jwt = unsigned + '.' + signature;
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:
+      'grant_type=' + encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') +
+      '&assertion=' + jwt,
+  });
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error('Gagal otentikasi Google: ' + JSON.stringify(data));
+  }
+
+  _cachedToken = data.access_token;
+  _cachedTokenExp = now + (data.expires_in || 3600);
+  return _cachedToken;
+}
+
+function base64url(input) {
+  let str;
+  if (typeof input === 'string') {
+    str = btoa(unescape(encodeURIComponent(input)));
+  } else {
+    const bytes = new Uint8Array(input);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    str = btoa(bin);
+  }
+  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function signRS256(data, pem) {
+  const key = await importPrivateKey(pem);
+  const enc = new TextEncoder().encode(data);
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc);
+  return base64url(sig);
+}
+
+async function importPrivateKey(pem) {
+  const clean = String(pem)
+    .replace(/\\n/g, '\n')
+    .replace('-----BEGIN PRIVATE KEY-----', '')
+    .replace('-----END PRIVATE KEY-----', '')
+    .replace(/\s/g, '');
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return crypto.subtle.importKey(
+    'pkcs8',
+    bytes.buffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+// GOOGLE SHEETS API HELPERS
+// ══════════════════════════════════════════════════════════════
+async function sheetsGetValues(env, token, range) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}/values/${encodeURIComponent(range)}`;
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (get)');
+  return data.values || [];
+}
+
+async function sheetsUpdateValues(env, token, range, values) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ range, values }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (update)');
+  return data;
+}
+
+async function sheetsAppendRow(env, token, sheetName, row) {
+  const range = `${sheetName}!A:A`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: [row] }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (append)');
+  return data;
+}
+
+async function getSheetId(env, token, sheetName) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}?fields=sheets.properties`;
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (get sheetId)');
+  const sheet = (data.sheets || []).find(s => s.properties.title === sheetName);
+  return sheet ? sheet.properties.sheetId : null;
+}
+
+async function deleteSheetRow(env, token, sheetName, rowIndex1based) {
+  const sheetId = await getSheetId(env, token, sheetName);
+  if (sheetId == null) throw new Error('Sheet tidak ditemukan: ' + sheetName);
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}:batchUpdate`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      requests: [{
+        deleteDimension: {
+          range: { sheetId, dimension: 'ROWS', startIndex: rowIndex1based - 1, endIndex: rowIndex1based },
+        },
+      }],
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (delete row)');
+  return data;
+}
+
+async function ensureConfigSheet(env, token) {
+  const sheetId = await getSheetId(env, token, SHEET_CONFIG);
+  if (sheetId == null) {
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}:batchUpdate`;
+    await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: SHEET_CONFIG } } }] }),
+    });
+    await sheetsUpdateValues(env, token, `${SHEET_CONFIG}!A1:C1`, [['KEY', 'VALUE', 'CREATED_AT']]);
+  }
+}
+
+// Baca sheet bertipe "Inventory/Transaksi": header di HEADER_ROW, data mulai DATA_ROW.
+// __row disisipkan di setiap object = nomor baris asli di spreadsheet (untuk update/delete).
+async function readSheetRows(env, token, sheetName) {
+  const headerVals = await sheetsGetValues(env, token, `${sheetName}!${HEADER_ROW}:${HEADER_ROW}`);
+  const headers = headerVals[0] || [];
+  const dataVals = await sheetsGetValues(env, token, `${sheetName}!${DATA_ROW}:200000`);
+
+  const rows = dataVals
+    .map((r, idx) => {
+      const obj = {};
+      headers.forEach((h, i) => { obj[h] = r[i] !== undefined ? r[i] : ''; });
+      obj.__row = DATA_ROW + idx;
+      return obj;
+    })
+    .filter(o => headers[0] && o[headers[0]] !== undefined && o[headers[0]] !== '');
+
+  return { headers, rows };
+}
+
+// Baca sheet "Config": header di baris 1, data mulai baris 2.
+async function readConfigRows(env, token) {
+  const values = await sheetsGetValues(env, token, `${SHEET_CONFIG}!A1:C200000`);
+  if (!values.length) return { headers: ['KEY', 'VALUE', 'CREATED_AT'], rows: [] };
+  const headers = values[0];
+  const rows = values.slice(1)
+    .map((r, idx) => {
+      const obj = {};
+      headers.forEach((h, i) => { obj[h] = r[i] !== undefined ? r[i] : ''; });
+      obj.__row = idx + 2;
+      return obj;
+    })
+    .filter(o => o.KEY !== undefined && o.KEY !== '');
+  return { headers, rows };
+}
+
+function colNumToLetter(n) {
+  let s = '';
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function formatDateTime(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function formatCompact(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// INVENTORY — Ambil semua alat untuk dropdown
+// ══════════════════════════════════════════════════════════════
+async function getInventory(env) {
+  try {
+    const token = await getAccessToken(env);
+    const { rows } = await readSheetRows(env, token, SHEET_INVENTORY);
+    const data = rows.map(r => { const c = { ...r }; delete c.__row; return c; });
+    return { success: true, data };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PEMINJAMAN — Kurangi stok & catat transaksi
+// ══════════════════════════════════════════════════════════════
+async function pinjamAlat(env, data) {
+  try {
+    const token = await getAccessToken(env);
+    const { headers, rows } = await readSheetRows(env, token, SHEET_INVENTORY);
+    const idxStok = headers.indexOf('Stok Tersedia');
+    if (headers.indexOf('ID Alat') < 0 || idxStok < 0) {
+      return { success: false, message: 'Kolom "ID Alat" atau "Stok Tersedia" tidak ditemukan di header.' };
+    }
+
+    const item = rows.find(r => String(r['ID Alat']).trim() === String(data.id_alat).trim());
+    if (!item) {
+      return { success: false, message: 'ID Alat "' + data.id_alat + '" tidak ditemukan di Inventory.' };
+    }
+
+    const stok = Number(item['Stok Tersedia'] || 0);
+    if (Number(data.jumlah) > stok) {
+      return { success: false, message: 'Stok tidak cukup. Stok tersedia: ' + stok + ' unit.' };
+    }
+
+    const colLetter = colNumToLetter(idxStok + 1);
+    await sheetsUpdateValues(env, token, `${SHEET_INVENTORY}!${colLetter}${item.__row}`, [[stok - Number(data.jumlah)]]);
+
+    const now = new Date();
+    const idTrans = 'TRX-' + formatCompact(now);
+
+    const row = [
+      idTrans,
+      data.id_alat,
+      data.nama_alat,
+      data.nama_peminjam,
+      data.nim_nip,
+      data.prodi_instansi || '',
+      data.no_hp,
+      Number(data.jumlah),
+      formatDateTime(now),
+      data.tanggal_kembali,
+      '',
+      'Dipinjam',
+      data.keperluan || '',
+      '',
+      '',
+      '',
+      data.attachment_url || '',
+    ];
+    await sheetsAppendRow(env, token, SHEET_TRANSAKSI, row);
+
+    return { success: true, message: 'Peminjaman berhasil!', id_transaksi: idTrans };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PENGEMBALIAN — Update transaksi & kembalikan stok
+// ══════════════════════════════════════════════════════════════
+async function kembalikanAlat(env, data) {
+  try {
+    const token = await getAccessToken(env);
+    const { headers, rows } = await readSheetRows(env, token, SHEET_TRANSAKSI);
+
+    const trx = rows.find(r => String(r['ID Transaksi']).trim() === String(data.id_transaksi).trim());
+    if (!trx) return { success: false, message: 'ID Transaksi "' + data.id_transaksi + '" tidak ditemukan.' };
+    if (trx['Status'] === 'Dikembalikan') {
+      return { success: false, message: 'Transaksi ini sudah dikembalikan sebelumnya.' };
+    }
+
+    const now = new Date();
+    const updates = {
+      'Tanggal Dikembalikan': formatDateTime(now),
+      'Status': 'Dikembalikan',
+      'Ket. Pengembalian': data.keterangan || '',
+    };
+    if (headers.includes('Nama Penerima')) updates['Nama Penerima'] = data.nama_penerima || '';
+    if (headers.includes('Kondisi Pengembalian')) updates['Kondisi Pengembalian'] = data.kondisi_barang || '';
+    if (headers.includes('Attachment URL') && data.attachment_url) updates['Attachment URL'] = data.attachment_url;
+
+    for (const key of Object.keys(updates)) {
+      const idx = headers.indexOf(key);
+      if (idx < 0) continue;
+      const colLetter = colNumToLetter(idx + 1);
+      await sheetsUpdateValues(env, token, `${SHEET_TRANSAKSI}!${colLetter}${trx.__row}`, [[updates[key]]]);
+    }
+
+    // Kembalikan stok Inventory
+    const { headers: invHeaders, rows: invRows } = await readSheetRows(env, token, SHEET_INVENTORY);
+    const invItem = invRows.find(r => String(r['ID Alat']).trim() === String(trx['ID Alat']).trim());
+    if (invItem) {
+      const idxStok = invHeaders.indexOf('Stok Tersedia');
+      if (idxStok >= 0) {
+        const colLetter = colNumToLetter(idxStok + 1);
+        const stokLama = Number(invItem['Stok Tersedia'] || 0);
+        const jumlah = Number(trx['Jumlah'] || 0);
+        await sheetsUpdateValues(env, token, `${SHEET_INVENTORY}!${colLetter}${invItem.__row}`, [[stokLama + jumlah]]);
+      }
+    }
+
+    return { success: true, message: 'Pengembalian berhasil dicatat!' };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// HISTORY — Ambil log transaksi
+// ══════════════════════════════════════════════════════════════
+async function getTransaksi(env, filter) {
+  try {
+    const token = await getAccessToken(env);
+    const { rows } = await readSheetRows(env, token, SHEET_TRANSAKSI);
+    let data = rows.map(r => { const c = { ...r }; delete c.__row; return c; });
+
+    const kw = filter && filter.keyword ? String(filter.keyword).trim().toLowerCase() : '';
+    if (kw) {
+      data = data.filter(r => Object.values(r).some(v => String(v).toLowerCase().includes(kw)));
+    }
+
+    data.reverse(); // terbaru di atas
+    const total = data.length;
+    if (!kw) data = data.slice(0, 300);
+
+    return { success: true, data, total };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// INPUT MATERIAL — Tambah alat baru ke Inventory
+// ══════════════════════════════════════════════════════════════
+async function addInventoryItem(env, item) {
+  try {
+    const token = await getAccessToken(env);
+    const { rows } = await readSheetRows(env, token, SHEET_INVENTORY);
+    const newId = String(item.id_alat).trim().toUpperCase();
+
+    if (rows.some(r => String(r['ID Alat']).trim().toUpperCase() === newId)) {
+      return { success: false, message: 'ID Alat "' + newId + '" sudah ada. Gunakan ID berbeda.' };
+    }
+
+    const now = formatDateTime(new Date());
+    const row = [
+      newId,
+      item.nama_alat,
+      item.kategori,
+      Number(item.jumlah_total),
+      Number(item.jumlah_total),
+      item.satuan,
+      item.kondisi,
+      item.lokasi || '',
+      item.keterangan || '',
+      now,
+    ];
+    await sheetsAppendRow(env, token, SHEET_INVENTORY, row);
+
+    return { success: true, message: 'Alat "' + item.nama_alat + '" berhasil ditambahkan!' };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ADMIN — Verifikasi login
+// ══════════════════════════════════════════════════════════════
+async function verifyAdmin(env, credentials) {
+  let username, password;
+  if (typeof credentials === 'string') {
+    username = env.SUPER_ADMIN_USERNAME;
+    password = credentials;
+  } else {
+    username = String((credentials && credentials.username) || '').trim().toLowerCase();
+    password = String((credentials && credentials.password) || '');
+  }
+
+  if (username === String(env.SUPER_ADMIN_USERNAME).toLowerCase() && password === env.SUPER_ADMIN_PASSWORD) {
+    return { success: true, isSuperAdmin: true, username: env.SUPER_ADMIN_USERNAME };
+  }
+
+  try {
+    const token = await getAccessToken(env);
+    const { rows } = await readConfigRows(env, token);
+    const key = ADMIN_KEY_PREFIX + username;
+    const acc = rows.find(r => String(r.KEY).trim() === key);
+    if (!acc) return { success: false, message: 'Username tidak ditemukan.' };
+    if (String(acc.VALUE) === password) return { success: true, isSuperAdmin: false, username };
+    return { success: false, message: 'Password salah.' };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ADMIN ACCOUNTS — Daftar / buat / hapus akun admin
+// ══════════════════════════════════════════════════════════════
+async function getAdminAccounts(env) {
+  try {
+    const token = await getAccessToken(env);
+    const { rows } = await readConfigRows(env, token);
+    const accounts = rows
+      .filter(r => String(r.KEY).startsWith(ADMIN_KEY_PREFIX))
+      .map(r => ({ username: String(r.KEY).slice(ADMIN_KEY_PREFIX.length), createdAt: r.CREATED_AT || '' }));
+    return { success: true, data: accounts };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+async function createAdminAccount(env, superPw, newUsername, newPassword) {
+  if (superPw !== env.SUPER_ADMIN_PASSWORD) return { success: false, message: 'Akses ditolak.' };
+
+  const uname = String(newUsername || '').trim().toLowerCase();
+  const pass = String(newPassword || '').trim();
+
+  if (!uname) return { success: false, message: 'Username tidak boleh kosong.' };
+  if (!pass) return { success: false, message: 'Password tidak boleh kosong.' };
+  if (pass.length < 6) return { success: false, message: 'Password minimal 6 karakter.' };
+  if (uname === String(env.SUPER_ADMIN_USERNAME).toLowerCase()) {
+    return { success: false, message: 'Username "' + uname + '" sudah digunakan.' };
+  }
+  if (!/^[a-z0-9_.]+$/.test(uname)) {
+    return { success: false, message: 'Username hanya boleh huruf kecil, angka, titik, dan underscore.' };
+  }
+
+  try {
+    const token = await getAccessToken(env);
+    await ensureConfigSheet(env, token);
+    const { rows } = await readConfigRows(env, token);
+    const key = ADMIN_KEY_PREFIX + uname;
+    if (rows.some(r => String(r.KEY).trim() === key)) {
+      return { success: false, message: 'Username "' + uname + '" sudah ada.' };
+    }
+    const now = formatDateTime(new Date());
+    await sheetsAppendRow(env, token, SHEET_CONFIG, [key, pass, now]);
+    return { success: true, message: 'Akun admin "' + uname + '" berhasil dibuat!' };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+async function deleteAdminAccount(env, superPw, targetUsername) {
+  if (superPw !== env.SUPER_ADMIN_PASSWORD) return { success: false, message: 'Akses ditolak.' };
+
+  const uname = String(targetUsername || '').trim().toLowerCase();
+  if (uname === String(env.SUPER_ADMIN_USERNAME).toLowerCase()) {
+    return { success: false, message: 'Akun super-admin tidak dapat dihapus.' };
+  }
+
+  try {
+    const token = await getAccessToken(env);
+    const { rows } = await readConfigRows(env, token);
+    const key = ADMIN_KEY_PREFIX + uname;
+    const acc = rows.find(r => String(r.KEY).trim() === key);
+    if (!acc) return { success: false, message: 'Akun "' + uname + '" tidak ditemukan.' };
+
+    await deleteSheetRow(env, token, SHEET_CONFIG, acc.__row);
+    return { success: true, message: 'Akun admin "' + uname + '" berhasil dihapus.' };
+  } catch (e) {
+    return { success: false, message: 'Error: ' + e.toString() };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// UPLOAD ATTACHMENT — Simpan file ke Google Drive (folder pribadi)
+// ══════════════════════════════════════════════════════════════
+async function uploadAttachment(env, base64, fileName, mimeType, idTrans) {
+  try {
+    if (!base64 || String(base64).trim() === '') {
+      return { success: false, message: 'Data file kosong.' };
+    }
+    if (!env.ATTACHMENT_FOLDER_ID) {
+      return { success: false, message: 'ATTACHMENT_FOLDER_ID belum dikonfigurasi.' };
+    }
+
+    const token = await getAccessToken(env);
+    const safeName = (idTrans + '_' + fileName).replace(/[^a-zA-Z0-9_.\-]/g, '_');
+
+    const metadata = { name: safeName, parents: [env.ATTACHMENT_FOLDER_ID] };
+    const boundary = '-------cfBoundary' + Date.now();
+    const bytes = base64ToBytes(base64);
+
+    const head = new TextEncoder().encode(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
+    );
+    const tail = new TextEncoder().encode(`\r\n--${boundary}--`);
+
+    const fullBody = new Uint8Array(head.length + bytes.length + tail.length);
+    fullBody.set(head, 0);
+    fullBody.set(bytes, head.length);
+    fullBody.set(tail, head.length + bytes.length);
+
+    const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body: fullBody,
+    });
+    const uploadData = await uploadRes.json();
+    if (!uploadRes.ok) {
+      return {
+        success: false,
+        message: 'Gagal membuat file di Drive. Pastikan folder sudah di-share ke service account dengan akses Editor. Detail: ' +
+          (uploadData.error?.message || JSON.stringify(uploadData)),
+      };
+    }
+
+    const fileId = uploadData.id;
+
+    try {
+      await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+      });
+    } catch (e) {
+      // File sudah terupload, lanjutkan meski setting sharing gagal
+    }
+
+    const fileUrl = `https://drive.google.com/file/d/${fileId}/view`;
+    return { success: true, url: fileUrl, fileId, message: 'File berhasil diupload.' };
+  } catch (e) {
+    return { success: false, message: 'Gagal upload file: ' + e.toString() };
+  }
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
