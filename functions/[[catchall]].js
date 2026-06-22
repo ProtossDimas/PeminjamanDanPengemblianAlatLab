@@ -5,11 +5,11 @@
 // ╚══════════════════════════════════════════════════════════════╝
 //
 // ENV VARS yang wajib di-set di Cloudflare Pages (Settings → Environment Variables):
-//   GOOGLE_CLIENT_EMAIL     → email service account (xxx@xxx.iam.gserviceaccount.com)
+//   GOOGLE_SERVICE_ACCOUNT_EMAIL     → email service account (xxx@xxx.iam.gserviceaccount.com)
 //   GOOGLE_PRIVATE_KEY      → private key PEM dari JSON key service account
 //                             (boleh disalin apa adanya, termasuk \n di dalamnya)
-//   SPREADSHEET_ID          → ID spreadsheet (sama seperti SPREADSHEET_ID lama)
-//   ATTACHMENT_FOLDER_ID    → ID folder Drive untuk attachment pengembalian
+//   GOOGLE_SHEET_ID          → ID spreadsheet (sama seperti GOOGLE_SHEET_ID lama)
+//   GOOGLE_DRIVE_FOLDER_ID    → ID folder Drive untuk attachment pengembalian
 //   SUPER_ADMIN_USERNAME    → username super-admin
 //   SUPER_ADMIN_PASSWORD    → password super-admin
 //
@@ -96,7 +96,7 @@ async function getAccessToken(env) {
 
   const header = { alg: 'RS256', typ: 'JWT' };
   const claim = {
-    iss: env.GOOGLE_CLIENT_EMAIL,
+    iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive',
     aud: 'https://oauth2.googleapis.com/token',
     exp: now + 3600,
@@ -166,7 +166,7 @@ async function importPrivateKey(pem) {
 // GOOGLE SHEETS API HELPERS
 // ══════════════════════════════════════════════════════════════
 async function sheetsGetValues(env, token, range) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}/values/${encodeURIComponent(range)}`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}`;
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (get)');
@@ -174,7 +174,7 @@ async function sheetsGetValues(env, token, range) {
 }
 
 async function sheetsUpdateValues(env, token, range, values) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
   const res = await fetch(url, {
     method: 'PUT',
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -187,7 +187,7 @@ async function sheetsUpdateValues(env, token, range, values) {
 
 async function sheetsAppendRow(env, token, sheetName, row) {
   const range = `${sheetName}!A:A`;
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -199,7 +199,7 @@ async function sheetsAppendRow(env, token, sheetName, row) {
 }
 
 async function getSheetId(env, token, sheetName) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}?fields=sheets.properties`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}?fields=sheets.properties`;
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (get sheetId)');
@@ -210,7 +210,7 @@ async function getSheetId(env, token, sheetName) {
 async function deleteSheetRow(env, token, sheetName, rowIndex1based) {
   const sheetId = await getSheetId(env, token, sheetName);
   if (sheetId == null) throw new Error('Sheet tidak ditemukan: ' + sheetName);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}:batchUpdate`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}:batchUpdate`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -230,7 +230,7 @@ async function deleteSheetRow(env, token, sheetName, rowIndex1based) {
 async function ensureConfigSheet(env, token) {
   const sheetId = await getSheetId(env, token, SHEET_CONFIG);
   if (sheetId == null) {
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.SPREADSHEET_ID}:batchUpdate`;
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}:batchUpdate`;
     await fetch(url, {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -580,14 +580,14 @@ async function uploadAttachment(env, base64, fileName, mimeType, idTrans) {
     if (!base64 || String(base64).trim() === '') {
       return { success: false, message: 'Data file kosong.' };
     }
-    if (!env.ATTACHMENT_FOLDER_ID) {
-      return { success: false, message: 'ATTACHMENT_FOLDER_ID belum dikonfigurasi.' };
+    if (!env.GOOGLE_DRIVE_FOLDER_ID) {
+      return { success: false, message: 'GOOGLE_DRIVE_FOLDER_ID belum dikonfigurasi.' };
     }
 
     const token = await getAccessToken(env);
     const safeName = (idTrans + '_' + fileName).replace(/[^a-zA-Z0-9_.\-]/g, '_');
 
-    const metadata = { name: safeName, parents: [env.ATTACHMENT_FOLDER_ID] };
+    const metadata = { name: safeName, parents: [env.GOOGLE_DRIVE_FOLDER_ID] };
     const boundary = '-------cfBoundary' + Date.now();
     const bytes = base64ToBytes(base64);
 
