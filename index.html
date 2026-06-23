@@ -81,17 +81,24 @@ body::before{
 
 /* ── HEADER ───────────────────────────────────────────── */
 header{
-  background:linear-gradient(135deg,rgba(16,70,160,0.88) 0%,rgba(7,16,31,0.96) 100%);
+  background:linear-gradient(135deg,#0d3a8c 0%,#081c3d 65%,#061226 100%);
   backdrop-filter:blur(20px);
-  border-bottom:1px solid rgba(0,212,170,0.2);
+  border-bottom:1px solid rgba(45,212,191,0.25);
   padding:14px 20px;
   display:flex;align-items:center;gap:14px;
   position:sticky;top:0;z-index:200;
   box-shadow:0 4px 40px rgba(0,0,0,0.5);
-  color:#eaf1ff; /* header selalu di atas background gelap, jadi teks dikunci terang */
+  color:#f3f7ff; /* header selalu di atas background gelap, jadi teks dikunci terang agar tetap jelas di kedua tema */
 }
-header h1,header p{color:inherit}
-.hdr-info p{color:var(--teal)!important}
+header h1{color:#f3f7ff;letter-spacing:.2px}
+.hdr-info p{color:#5eead4!important}
+
+/* Chip admin di dalam header dikunci warnanya supaya tetap jelas di kedua tema */
+header .chip-name{color:#ffce5c!important}
+header .chip-name.super{color:#fca5a5!important}
+header .chip-role{color:rgba(243,247,255,0.6)!important}
+header .chip-logout{color:rgba(243,247,255,0.6)!important}
+header .chip-logout:hover{color:#fca5a5!important}
 
 .hdr-logo{
   height:42px;width:auto;max-width:48px;flex-shrink:0;
@@ -114,7 +121,7 @@ header h1,header p{color:inherit}
 .hdr-info p{font-size:clamp(10px,1.7vw,12px);color:var(--teal);font-weight:600;margin-top:2px}
 
 .hdr-clock{
-  font-family:var(--mono);font-size:11px;color:rgba(234,241,255,0.65);
+  font-family:var(--mono);font-size:11px;color:rgba(243,247,255,0.6);
   text-align:right;flex-shrink:0;line-height:1.6;
 }
 
@@ -1113,7 +1120,7 @@ function renderTabPinjam(){
           </div>
           <div class="fg full">
             <label>
-              Lampiran Dokumen Peminjaman
+              Unggah Foto Kondisi Alat Sebelum Dipinjam
               <span style="font-weight:400;color:var(--muted);text-transform:none;font-size:11px;margin-left:6px">
                 (opsional — PDF / JPG / PNG, maks. 10 MB)
               </span>
