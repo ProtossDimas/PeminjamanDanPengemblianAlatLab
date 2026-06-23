@@ -4,6 +4,15 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Lab Pengolahan Air dan Limbah Industri - Peminjaman Alat</title>
+<script>
+  // Terapkan tema sebelum render agar tidak ada efek "flash" warna
+  (function(){
+    try{
+      var t = localStorage.getItem('site-theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    }catch(e){}
+  })();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet"/>
@@ -24,10 +33,35 @@
   --border:  rgba(255,255,255,0.09);
   --txt:     #dce8fb;
   --muted:   #7a90b2;
+  --input-bg:rgba(255,255,255,0.05);
   --r:       13px;
   --font:    'Plus Jakarta Sans', sans-serif;
   --mono:    'JetBrains Mono', monospace;
 }
+
+/* ── LIGHT THEME ──────────────────────────────────────── */
+:root[data-theme="light"]{
+  --blue-l:  #155ec0;
+  --teal:    #048a70;
+  --teal-d:  #037a63;
+  --gold:    #9a6308;
+  --red:     #d23030;
+  --bg:      #eef2f8;
+  --s1:      rgba(10,25,50,0.04);
+  --s2:      rgba(10,25,50,0.07);
+  --border:  rgba(10,25,50,0.13);
+  --txt:     #16213b;
+  --muted:   #54627c;
+  --input-bg:#ffffff;
+}
+:root[data-theme="light"] body::before{
+  opacity:0.55;
+}
+:root[data-theme="light"] .land-hero h2{
+  background:linear-gradient(135deg,var(--navy) 15%,var(--teal));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+:root[data-theme="light"] select option{background:#ffffff;color:var(--txt)}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
 body{font-family:var(--font);background:var(--bg);color:var(--txt);min-height:100vh;overflow-x:hidden}
@@ -54,7 +88,25 @@ header{
   display:flex;align-items:center;gap:14px;
   position:sticky;top:0;z-index:200;
   box-shadow:0 4px 40px rgba(0,0,0,0.5);
+  color:#eaf1ff; /* header selalu di atas background gelap, jadi teks dikunci terang */
 }
+header h1,header p{color:inherit}
+.hdr-info p{color:var(--teal)!important}
+
+.hdr-logo{
+  width:42px;height:42px;border-radius:50%;flex-shrink:0;
+  object-fit:cover;background:rgba(255,255,255,0.08);
+  border:2px solid rgba(0,212,170,0.55);
+  box-shadow:0 2px 10px rgba(0,0,0,0.35);
+}
+
+.theme-toggle{
+  background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);
+  color:#eaf1ff;width:36px;height:36px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;font-size:14px;flex-shrink:0;transition:all .2s;
+}
+.theme-toggle:hover{background:rgba(0,212,170,0.2);border-color:var(--teal)}
 
 .hdr-info{flex:1;min-width:0}
 .hdr-info h1{
@@ -64,7 +116,7 @@ header{
 .hdr-info p{font-size:clamp(10px,1.7vw,12px);color:var(--teal);font-weight:600;margin-top:2px}
 
 .hdr-clock{
-  font-family:var(--mono);font-size:11px;color:var(--muted);
+  font-family:var(--mono);font-size:11px;color:rgba(234,241,255,0.65);
   text-align:right;flex-shrink:0;line-height:1.6;
 }
 
@@ -147,7 +199,7 @@ main{flex:1;padding:26px 18px;max-width:860px;width:100%;margin:0 auto}
 .fg.full{grid-column:1/-1}
 
 input,select,textarea{
-  background:rgba(255,255,255,0.05);border:1px solid var(--border);
+  background:var(--input-bg);border:1px solid var(--border);
   border-radius:8px;color:var(--txt);font-family:var(--font);font-size:14px;
   padding:10px 13px;transition:border-color .2s,box-shadow .2s;outline:none;width:100%;
 }
@@ -440,12 +492,17 @@ footer span{color:var(--teal)}
 <div id="app">
   <!-- HEADER -->
   <header>
+    <img id="site-logo" class="hdr-logo" src="logo.png" alt="Logo"
+         onerror="this.style.display='none'"/>
     <div class="hdr-info">
       <h1>POLITEKNIK NEGERI BANDUNG</h1>
       <p>Lab Pengolahan Air dan Limbah Industri · Sistem Peminjaman Alat</p>
     </div>
     <div id="admin-chip" class="hidden"></div>
     <div class="hdr-clock" id="hdr-clock"></div>
+    <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Ganti tema terang/gelap">
+      <i id="theme-icon" class="fas fa-sun"></i>
+    </button>
   </header>
   <div id="admin-session-bar" class="hidden"></div>
 
@@ -645,7 +702,7 @@ function confirmLogout(){
         tanpa memasukkan password.
       </p>
     </div>
-    <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);
+    <div style="background:var(--s1);border:1px solid var(--border);
                 border-radius:10px;padding:12px 16px;margin-bottom:20px;
                 display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)">
       <i class="fas fa-info-circle" style="color:var(--teal);font-size:14px;flex-shrink:0"></i>
@@ -1950,15 +2007,33 @@ function doDeleteAdmin(username){
 }
 
 // ─────────────────────────────────────────────────────────
+// THEME (dark / light)
+// ─────────────────────────────────────────────────────────
+function applyThemeIcon(){
+  const t = document.documentElement.getAttribute('data-theme') || 'dark';
+  const ic = $('theme-icon');
+  if(ic) ic.className = t === 'light' ? 'fas fa-moon' : 'fas fa-sun';
+}
+function toggleTheme(){
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  try{ localStorage.setItem('site-theme', next); }catch(e){}
+  applyThemeIcon();
+}
+
+// ─────────────────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded',()=>{
   $('yr').textContent = new Date().getFullYear();
+  applyThemeIcon();
   initBG();
   clock();
   updateAdminUI();
   render();
 });
+
 
 </script>
 </body>
