@@ -1487,21 +1487,18 @@ function clearAttachment(){
 
 function doKembalikan(idTrans, penerima, kondisi, keterangan, attachmentUrl){
   const btn  = document.getElementById('btn-kembali');
+  // Catatan: form Kembalikan Alat TIDAK punya elemen att-progress/att-bar/att-status
+  // (elemen itu hanya ada di form Pinjam Alat). Selalu null-check di sini —
+  // kalau tidak, error "Cannot set properties of null" akan terlempar duluan
+  // dan menghentikan success/failure handler sebelum sempat me-reset tombol,
+  // sehingga tombol macet di "Memproses..." walau data sudah tersimpan di server.
   const prog = document.getElementById('att-progress');
-  const bar  = document.getElementById('att-bar');
-  const sts  = document.getElementById('att-status');
 
   google.script.run
     .withSuccessHandler(res=>{
-      prog.style.display='none';
+      if(prog) prog.style.display='none';
       btn.disabled=false; btn.innerHTML='<i class="fas fa-check-circle"></i> Konfirmasi Pengembalian';
       if(res.success){
-        console.log('[DEBUG TIMING] kembalikanAlat:', res._timing);
-        if(res._timing){
-          alert('DEBUG TIMING v2\n\nTotal: ' + res._timing.total_ms + 'ms\nAmbil token: ' + res._timing.get_token_ms + 'ms\nBaca sheet: ' + res._timing.read_sheets_ms + 'ms\nUpdate sheet: ' + res._timing.batch_update_ms + 'ms');
-        } else {
-          alert('DEBUG: _timing TIDAK ADA di response.\nIni berarti server masih menjalankan versi LAMA __catchall__.js (belum ter-deploy / masih ke-cache).\n\nResponse mentah: ' + JSON.stringify(res));
-        }
         toast('Pengembalian berhasil dicatat!');
         S.loaded=false;
         document.getElementById('r-id').value='';
@@ -1510,13 +1507,11 @@ function doKembalikan(idTrans, penerima, kondisi, keterangan, attachmentUrl){
         document.getElementById('r-kondisi').value='';
         clearAttachment();
       } else {
-        console.log('[DEBUG TIMING] kembalikanAlat (gagal):', res._timing);
-        alert('GAGAL.\n\nPesan: ' + res.message + '\n\n_timing: ' + JSON.stringify(res._timing || 'TIDAK ADA'));
         toast(res.message,'err');
       }
     })
     .withFailureHandler(err=>{
-      prog.style.display='none';
+      if(prog) prog.style.display='none';
       btn.disabled=false; btn.innerHTML='<i class="fas fa-check-circle"></i> Konfirmasi Pengembalian';
       toast(err.toString(),'err');
     })
