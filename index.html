@@ -544,12 +544,17 @@ Object.defineProperty(window.google.script, 'run', {
         }
         // prop = nama fungsi backend, misal getInventory, pinjamAlat, dst.
         return (...args) => {
+          const controller = new AbortController();
+          const timeoutMs = 30000; // 30 detik — kalau server tidak respon sama sekali, jangan diam selamanya
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
           fetch('/api/' + prop, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ args }),
+            signal: controller.signal,
           })
             .then(async (res) => {
+              clearTimeout(timer);
               const data = await res.json().catch(() => ({}));
               if (!res.ok && !('success' in data)) {
                 throw new Error(data.message || ('HTTP ' + res.status));
@@ -557,8 +562,13 @@ Object.defineProperty(window.google.script, 'run', {
               if (handlers.success) handlers.success(data);
             })
             .catch((err) => {
-              if (handlers.failure) handlers.failure(err);
-              else console.error('google.script.run error:', err);
+              clearTimeout(timer);
+              const isTimeout = err.name === 'AbortError';
+              const finalErr = isTimeout
+                ? new Error('Server tidak merespon dalam ' + (timeoutMs/1000) + ' detik (kemungkinan macet di backend/Google API).')
+                : err;
+              if (handlers.failure) handlers.failure(finalErr);
+              else console.error('google.script.run error:', finalErr);
             });
         };
       },
