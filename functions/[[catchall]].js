@@ -104,13 +104,50 @@ function jsonResponse(obj, status = 200) {
 // ══════════════════════════════════════════════════════════════
 // GOOGLE AUTH — Service Account JWT (RS256) via Web Crypto
 // ══════════════════════════════════════════════════════════════
-let _cachedToken = null;
-let _cachedTokenExp = 0;
+//
+// PENTING: variabel biasa (let _cachedToken) TIDAK bisa diandalkan di
+// Cloudflare Pages Functions, karena setiap isolate bisa di-cold-start ulang
+// kapan saja (terutama saat traffic jarang/jeda antar klik admin) — begitu
+// itu terjadi, variabel di memori hilang dan server harus exchange token
+// ke Google lagi dari nol (1 request HTTP tambahan + RSA sign), yang
+// membuat proses jadi lambat tanpa terlihat jelas sebabnya.
+//
+// Solusinya: simpan token di Cloudflare Cache API (`caches.default`).
+// Cache ini hidup di level edge/colo, jadi tetap ada walau isolate
+// JS-nya direstart, sehingga token benar-benar bisa dipakai ulang.
+const GOOGLE_TOKEN_CACHE_KEY = 'https://internal-cache.local/google-sheets-token';
+const GOOGLE_DRIVE_TOKEN_CACHE_KEY = 'https://internal-cache.local/google-drive-token';
+
+async function getCachedToken(cacheKey) {
+  try {
+    const cache = caches.default;
+    const hit = await cache.match(cacheKey);
+    if (!hit) return null;
+    const data = await hit.json();
+    if (data.exp > Math.floor(Date.now() / 1000) + 30) return data.token;
+    return null;
+  } catch (e) {
+    return null; // Cache API gagal/unavailable → fallback ke exchange token baru
+  }
+}
+
+async function setCachedToken(cacheKey, token, expiresInSeconds) {
+  try {
+    const cache = caches.default;
+    const exp = Math.floor(Date.now() / 1000) + expiresInSeconds;
+    const body = JSON.stringify({ token, exp });
+    const maxAge = Math.max(30, expiresInSeconds - 30);
+    await cache.put(cacheKey, new Response(body, {
+      headers: { 'Cache-Control': `max-age=${maxAge}`, 'Content-Type': 'application/json' },
+    }));
+  } catch (e) { /* gagal cache bukan fatal, token tetap dipakai untuk request ini */ }
+}
 
 async function getAccessToken(env) {
-  const now = Math.floor(Date.now() / 1000);
-  if (_cachedToken && _cachedTokenExp > now + 30) return _cachedToken;
+  const cached = await getCachedToken(GOOGLE_TOKEN_CACHE_KEY);
+  if (cached) return cached;
 
+  const now = Math.floor(Date.now() / 1000);
   const header = { alg: 'RS256', typ: 'JWT' };
   const claim = {
     iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
@@ -136,9 +173,8 @@ async function getAccessToken(env) {
     throw new Error('Gagal otentikasi Google: ' + JSON.stringify(data));
   }
 
-  _cachedToken = data.access_token;
-  _cachedTokenExp = now + (data.expires_in || 3600);
-  return _cachedToken;
+  await setCachedToken(GOOGLE_TOKEN_CACHE_KEY, data.access_token, data.expires_in || 3600);
+  return data.access_token;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -146,12 +182,9 @@ async function getAccessToken(env) {
 // Dipisah dari getAccessToken() karena Service Account tidak punya
 // kuota storage di Drive biasa (bukan Shared Drive).
 // ══════════════════════════════════════════════════════════════
-let _cachedDriveToken = null;
-let _cachedDriveTokenExp = 0;
-
 async function getDriveAccessToken(env) {
-  const now = Math.floor(Date.now() / 1000);
-  if (_cachedDriveToken && _cachedDriveTokenExp > now + 30) return _cachedDriveToken;
+  const cached = await getCachedToken(GOOGLE_DRIVE_TOKEN_CACHE_KEY);
+  if (cached) return cached;
 
   if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET || !env.GOOGLE_OAUTH_REFRESH_TOKEN) {
     throw new Error(
@@ -174,9 +207,8 @@ async function getDriveAccessToken(env) {
     throw new Error('Gagal refresh OAuth token Drive: ' + JSON.stringify(data));
   }
 
-  _cachedDriveToken = data.access_token;
-  _cachedDriveTokenExp = now + (data.expires_in || 3600);
-  return _cachedDriveToken;
+  await setCachedToken(GOOGLE_DRIVE_TOKEN_CACHE_KEY, data.access_token, data.expires_in || 3600);
+  return data.access_token;
 }
 
 function base64url(input) {
