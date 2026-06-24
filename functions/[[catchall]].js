@@ -479,19 +479,24 @@ async function pinjamAlat(env, data) {
 // PENGEMBALIAN — Update transaksi & kembalikan stok
 // ══════════════════════════════════════════════════════════════
 async function kembalikanAlat(env, data) {
+  const t0 = Date.now();
+  const timing = {};
   try {
     const token = await getAccessToken(env);
+    timing.get_token_ms = Date.now() - t0;
 
+    const t1 = Date.now();
     // Baca Transaksi & Inventory SEKALIGUS (paralel), bukan satu-satu.
     const [{ headers, rows }, { headers: invHeaders, rows: invRows }] = await Promise.all([
       readSheetRows(env, token, SHEET_TRANSAKSI),
       readSheetRows(env, token, SHEET_INVENTORY),
     ]);
+    timing.read_sheets_ms = Date.now() - t1;
 
     const trx = rows.find(r => String(r['ID Transaksi']).trim() === String(data.id_transaksi).trim());
-    if (!trx) return { success: false, message: 'ID Transaksi "' + data.id_transaksi + '" tidak ditemukan.' };
+    if (!trx) return { success: false, message: 'ID Transaksi "' + data.id_transaksi + '" tidak ditemukan.', _timing: timing };
     if (trx['Status'] === 'Dikembalikan') {
-      return { success: false, message: 'Transaksi ini sudah dikembalikan sebelumnya.' };
+      return { success: false, message: 'Transaksi ini sudah dikembalikan sebelumnya.', _timing: timing };
     }
 
     const now = new Date();
@@ -526,11 +531,17 @@ async function kembalikanAlat(env, data) {
     }
 
     // SATU request HTTP untuk semua update, bukan 5-6 request berurutan.
+    const t2 = Date.now();
     await sheetsBatchUpdateValues(env, token, batchData);
+    timing.batch_update_ms = Date.now() - t2;
+    timing.total_ms = Date.now() - t0;
+    console.log('kembalikanAlat timing:', JSON.stringify(timing));
 
-    return { success: true, message: 'Pengembalian berhasil dicatat!' };
+    return { success: true, message: 'Pengembalian berhasil dicatat!', _timing: timing };
   } catch (e) {
-    return { success: false, message: 'Error: ' + e.toString() };
+    timing.total_ms = Date.now() - t0;
+    console.log('kembalikanAlat ERROR timing:', JSON.stringify(timing));
+    return { success: false, message: 'Error: ' + e.toString(), _timing: timing };
   }
 }
 
