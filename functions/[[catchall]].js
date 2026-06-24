@@ -240,6 +240,22 @@ async function sheetsUpdateValues(env, token, range, values) {
   return data;
 }
 
+// Update banyak cell sekaligus dalam SATU request HTTP (jauh lebih cepat
+// daripada memanggil sheetsUpdateValues() berkali-kali secara berurutan).
+async function sheetsBatchUpdateValues(env, token, dataList) {
+  // dataList: [{ range, values: [[...]] }, ...]
+  if (!dataList.length) return null;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values:batchUpdate`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: dataList }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (batchUpdate)');
+  return data;
+}
+
 async function sheetsAppendRow(env, token, sheetName, row) {
   const range = `${sheetName}!A:A`;
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
@@ -298,9 +314,11 @@ async function ensureConfigSheet(env, token) {
 // Baca sheet bertipe "Inventory/Transaksi": header di HEADER_ROW, data mulai DATA_ROW.
 // __row disisipkan di setiap object = nomor baris asli di spreadsheet (untuk update/delete).
 async function readSheetRows(env, token, sheetName) {
-  const headerVals = await sheetsGetValues(env, token, `${sheetName}!${HEADER_ROW}:${HEADER_ROW}`);
+  const [headerVals, dataVals] = await Promise.all([
+    sheetsGetValues(env, token, `${sheetName}!${HEADER_ROW}:${HEADER_ROW}`),
+    sheetsGetValues(env, token, `${sheetName}!${DATA_ROW}:200000`),
+  ]);
   const headers = headerVals[0] || [];
-  const dataVals = await sheetsGetValues(env, token, `${sheetName}!${DATA_ROW}:200000`);
 
   const rows = dataVals
     .map((r, idx) => {
@@ -425,7 +443,12 @@ async function pinjamAlat(env, data) {
 async function kembalikanAlat(env, data) {
   try {
     const token = await getAccessToken(env);
-    const { headers, rows } = await readSheetRows(env, token, SHEET_TRANSAKSI);
+
+    // Baca Transaksi & Inventory SEKALIGUS (paralel), bukan satu-satu.
+    const [{ headers, rows }, { headers: invHeaders, rows: invRows }] = await Promise.all([
+      readSheetRows(env, token, SHEET_TRANSAKSI),
+      readSheetRows(env, token, SHEET_INVENTORY),
+    ]);
 
     const trx = rows.find(r => String(r['ID Transaksi']).trim() === String(data.id_transaksi).trim());
     if (!trx) return { success: false, message: 'ID Transaksi "' + data.id_transaksi + '" tidak ditemukan.' };
@@ -443,15 +466,16 @@ async function kembalikanAlat(env, data) {
     if (headers.includes('Kondisi Pengembalian')) updates['Kondisi Pengembalian'] = data.kondisi_barang || '';
     if (headers.includes('Attachment URL') && data.attachment_url) updates['Attachment URL'] = data.attachment_url;
 
+    // Susun SEMUA perubahan kolom transaksi jadi satu batch request.
+    const batchData = [];
     for (const key of Object.keys(updates)) {
       const idx = headers.indexOf(key);
       if (idx < 0) continue;
       const colLetter = colNumToLetter(idx + 1);
-      await sheetsUpdateValues(env, token, `${SHEET_TRANSAKSI}!${colLetter}${trx.__row}`, [[updates[key]]]);
+      batchData.push({ range: `${SHEET_TRANSAKSI}!${colLetter}${trx.__row}`, values: [[updates[key]]] });
     }
 
-    // Kembalikan stok Inventory
-    const { headers: invHeaders, rows: invRows } = await readSheetRows(env, token, SHEET_INVENTORY);
+    // Kembalikan stok Inventory — tambahkan ke batch yang sama jika ditemukan.
     const invItem = invRows.find(r => String(r['ID Alat']).trim() === String(trx['ID Alat']).trim());
     if (invItem) {
       const idxStok = invHeaders.indexOf('Stok Tersedia');
@@ -459,9 +483,12 @@ async function kembalikanAlat(env, data) {
         const colLetter = colNumToLetter(idxStok + 1);
         const stokLama = Number(invItem['Stok Tersedia'] || 0);
         const jumlah = Number(trx['Jumlah'] || 0);
-        await sheetsUpdateValues(env, token, `${SHEET_INVENTORY}!${colLetter}${invItem.__row}`, [[stokLama + jumlah]]);
+        batchData.push({ range: `${SHEET_INVENTORY}!${colLetter}${invItem.__row}`, values: [[stokLama + jumlah]] });
       }
     }
+
+    // SATU request HTTP untuk semua update, bukan 5-6 request berurutan.
+    await sheetsBatchUpdateValues(env, token, batchData);
 
     return { success: true, message: 'Pengembalian berhasil dicatat!' };
   } catch (e) {
