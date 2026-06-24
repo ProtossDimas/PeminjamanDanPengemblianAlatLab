@@ -427,6 +427,21 @@ function formatCompact(d) {
   return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
 }
 
+// PENTING: kita menulis ke Sheets dengan valueInputOption=USER_ENTERED, yang
+// artinya Google Sheets BERHAK menafsirkan ulang string seperti "2026-06-27"
+// menjadi tipe Date asli (serial number internal). Ini menyebabkan kolom
+// "Rencana Kembali" kadang tampil sebagai teks tanggal normal, kadang sebagai
+// angka serial mentah (mis. "46200") — tergantung histori format sel di baris
+// tersebut. Untuk kolom yang HARUS selalu tampil sebagai teks tanggal apa
+// adanya (bukan dipakai untuk perhitungan/formula di Sheets), kita paksa
+// Sheets memperlakukannya sebagai teks murni dengan prefix apostrof ('),
+// yaitu trik standar Google Sheets untuk "force as text". Apostrofnya sendiri
+// tidak akan ikut tersimpan/tertampil di cell.
+function forceText(v) {
+  if (v === undefined || v === null || v === '') return v;
+  return "'" + String(v);
+}
+
 // ══════════════════════════════════════════════════════════════
 // INVENTORY — Ambil semua alat untuk dropdown
 // ══════════════════════════════════════════════════════════════
@@ -479,7 +494,7 @@ async function pinjamAlat(env, data) {
       data.no_hp,
       Number(data.jumlah),
       formatDateTime(now),
-      data.tanggal_kembali,
+      forceText(data.tanggal_kembali),
       '',
       'Dipinjam',
       data.keperluan || '',
