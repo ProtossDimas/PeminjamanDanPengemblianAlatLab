@@ -1486,7 +1486,8 @@ function doKembalikan(idTrans, penerima, kondisi, keterangan, attachmentUrl){
       prog.style.display='none';
       btn.disabled=false; btn.innerHTML='<i class="fas fa-check-circle"></i> Konfirmasi Pengembalian';
       if(res.success){
-        toast('Pengembalian berhasil dicatat!');
+        if(res._timing) console.log('[DEBUG TIMING] kembalikanAlat:', res._timing);
+        toast('Pengembalian berhasil dicatat!' + (res._timing ? ' (total ' + res._timing.total_ms + 'ms — token ' + res._timing.get_token_ms + 'ms, baca ' + res._timing.read_sheets_ms + 'ms, update ' + res._timing.batch_update_ms + 'ms)' : ''));
         S.loaded=false;
         document.getElementById('r-id').value='';
         document.getElementById('r-ket').value='';
@@ -1494,6 +1495,7 @@ function doKembalikan(idTrans, penerima, kondisi, keterangan, attachmentUrl){
         document.getElementById('r-kondisi').value='';
         clearAttachment();
       } else {
+        if(res._timing) console.log('[DEBUG TIMING] kembalikanAlat (gagal):', res._timing);
         toast(res.message,'err');
       }
     })
