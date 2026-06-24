@@ -161,13 +161,13 @@ async function getAccessToken(env) {
   const signature = await signRS256(unsigned, env.GOOGLE_PRIVATE_KEY);
   const jwt = unsigned + '.' + signature;
 
-  const res = await fetch('https://oauth2.googleapis.com/token', {
+  const res = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
       'grant_type=' + encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') +
       '&assertion=' + jwt,
-  });
+  }, 8000);
   const data = await res.json();
   if (!data.access_token) {
     throw new Error('Gagal otentikasi Google: ' + JSON.stringify(data));
@@ -193,7 +193,7 @@ async function getDriveAccessToken(env) {
     );
   }
 
-  const res = await fetch('https://oauth2.googleapis.com/token', {
+  const res = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body:
@@ -201,7 +201,7 @@ async function getDriveAccessToken(env) {
       '&client_secret=' + encodeURIComponent(env.GOOGLE_OAUTH_CLIENT_SECRET) +
       '&refresh_token=' + encodeURIComponent(env.GOOGLE_OAUTH_REFRESH_TOKEN) +
       '&grant_type=refresh_token',
-  });
+  }, 8000);
   const data = await res.json();
   if (!data.access_token) {
     throw new Error('Gagal refresh OAuth token Drive: ' + JSON.stringify(data));
@@ -252,9 +252,30 @@ async function importPrivateKey(pem) {
 // ══════════════════════════════════════════════════════════════
 // GOOGLE SHEETS API HELPERS
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// FETCH DENGAN TIMEOUT — supaya panggilan ke Google API yang macet
+// (network gantung, DNS lambat, dll) tidak membuat seluruh request
+// nge-hang TANPA BATAS. Kalau Google tidak merespon dalam waktu yang
+// ditentukan, langsung dilempar error yang jelas, bukan diam selamanya.
+// ══════════════════════════════════════════════════════════════
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error(`Timeout: tidak ada respon dari Google dalam ${timeoutMs / 1000} detik (URL: ${url.split('?')[0]})`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function sheetsGetValues(env, token, range) {
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}`;
-  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  const res = await fetchWithTimeout(url, { headers: { Authorization: 'Bearer ' + token } });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message || 'Sheets API error (get)');
   return data.values || [];
@@ -262,7 +283,7 @@ async function sheetsGetValues(env, token, range) {
 
 async function sheetsUpdateValues(env, token, range, values) {
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: 'PUT',
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ range, values }),
@@ -278,7 +299,7 @@ async function sheetsBatchUpdateValues(env, token, dataList) {
   // dataList: [{ range, values: [[...]] }, ...]
   if (!dataList.length) return null;
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values:batchUpdate`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: dataList }),
@@ -348,7 +369,7 @@ async function ensureConfigSheet(env, token) {
 async function readSheetRows(env, token, sheetName) {
   const [headerVals, dataVals] = await Promise.all([
     sheetsGetValues(env, token, `${sheetName}!${HEADER_ROW}:${HEADER_ROW}`),
-    sheetsGetValues(env, token, `${sheetName}!${DATA_ROW}:200000`),
+    sheetsGetValues(env, token, `${sheetName}!${DATA_ROW}:5000`),
   ]);
   const headers = headerVals[0] || [];
 
@@ -366,7 +387,7 @@ async function readSheetRows(env, token, sheetName) {
 
 // Baca sheet "Config": header di baris 1, data mulai baris 2.
 async function readConfigRows(env, token) {
-  const values = await sheetsGetValues(env, token, `${SHEET_CONFIG}!A1:C200000`);
+  const values = await sheetsGetValues(env, token, `${SHEET_CONFIG}!A1:C5000`);
   if (!values.length) return { headers: ['KEY', 'VALUE', 'CREATED_AT'], rows: [] };
   const headers = values[0];
   const rows = values.slice(1)
