@@ -760,6 +760,25 @@ function fmtDate(v){
   }catch{ return v; }
 }
 
+// Khusus untuk tanggal "deadline" (Rencana Kembali) yang sifatnya per-hari,
+// bukan timestamp presisi-menit. Sengaja TIDAK menampilkan jam supaya tidak
+// kena masalah geser timezone akibat cara Google Sheets menyimpan tanggal
+// polos (date-only) sebagai tanggal-serial berbasis timezone Sheet itu sendiri.
+// Kalau value sudah berupa ISO datetime (ada "T"), kita ambil bagian tanggalnya
+// saja dari potongan string sebelum "T" — supaya TIDAK ikut dikonversi lagi ke
+// timezone device (yang justru bisa menggeser tanggalnya jadi h-1 / h+1).
+function fmtDateOnly(v){
+  if(!v||v==='-'||v==='') return '-';
+  try{
+    const datePart = String(v).includes('T') ? String(v).split('T')[0] : String(v).split(' ')[0];
+    const m = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(!m) return v;
+    const d = new Date(Number(m[1]), Number(m[2])-1, Number(m[3])); // local, tanpa offset UTC
+    if(isNaN(d)) return v;
+    return d.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
+  }catch{ return v; }
+}
+
 function stokBadge(n){
   n=Number(n);
   if(n<=0)  return `<span class="badge b-err">Habis</span>`;
@@ -1624,7 +1643,7 @@ function renderHistTbl(data){
               <td>${r['Nama Alat']||'-'}</td>
               <td style="text-align:center">${r['Jumlah']||'-'}</td>
               <td style="white-space:nowrap">${fmtDate(r['Tanggal Pinjam'])}</td>
-              <td style="white-space:nowrap">${r['Rencana Kembali']||'-'}</td>
+              <td style="white-space:nowrap">${fmtDateOnly(r['Rencana Kembali'])}</td>
               <td style="white-space:nowrap">${fmtDate(r['Tanggal Dikembalikan'])}</td>
               <td>${r['Nama Penerima']||'<span style="color:var(--muted)">—</span>'}</td>
               <td>${kondisiCell}</td>
