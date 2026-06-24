@@ -358,14 +358,20 @@ function colNumToLetter(n) {
   return s;
 }
 
+// PENTING: server (Cloudflare Workers) selalu berjalan di UTC. Jangan
+// menggeser jam secara manual di sini — simpan UTC MURNI dalam format ISO
+// (ada "Z" di akhir) supaya browser/HP siapa pun yang membuka aplikasi bisa
+// otomatis menampilkannya sesuai timezone lokal masing-masing (WIB/WITA/WIT/
+// atau timezone lain di luar negeri), lewat toLocaleString di frontend.
 function formatDateTime(d) {
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return d.toISOString(); // contoh: 2026-06-24T03:01:00.000Z
 }
 
 function formatCompact(d) {
   const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  // Dipakai untuk ID transaksi (TRX-...) — tetap UTC, hanya untuk keunikan ID,
+  // tidak ditampilkan sebagai "jam asli" ke user jadi tidak masalah.
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
 }
 
 // ══════════════════════════════════════════════════════════════
